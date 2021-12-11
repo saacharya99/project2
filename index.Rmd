@@ -46,15 +46,21 @@ class_diag <- function(score, truth, positive, cutoff=.5){
 
 # Mining, Classification, Prediction
 
-## Name and EID here
+## Samrina Acharya (sa52354)
 
 ### Introduction 
 
-Paragraph or two introducing your datasets and variables, why they are interesting to you, etc. See instructions for more information
+I obtained data on abortion legalization and it's affect on sexually transmitted infection rates through examining individuals from different U.S. States. This dataset was selected due to the prevalence of stricter abortion laws in the state of Texas going against previous rulings such as Roe v. Wade. In order to examine this effect on a multitude of different factors, we must examine the trends among different states and their existing legislation. In addition to the variables State name, Repeal of Abortion Prohibition Status and AIDS and Gonnorhea rates, the dataset includes age, race, year, total population, incarceration rates, crack index, alcohol consumption per capita, income, unemployment rates, and poverty rate. The state name was listed by FIPS code so a join with another dataset containing all the states and their respective FIPS codes was necessary. The resulting dataset had 17921 observations, 15 columns containing each variable. There is one categorical binary variable for repeal status.
 
 ```{R}
 library(tidyverse)
-# read your datasets in here, e.g., with read_csv()
+abortion <- read_csv("~/abortion.csv")
+statefips <- read_csv("~/state-fips.csv")
+statefips <- statefips %>% mutate(fip= as.double(st)) %>% select(-stusps)
+abortion <- statefips %>% right_join(abortion, by="fip")
+abortion<- abortion %>% select(-st, -fip,-X1, -wht, -male, -younger, -fa, -pi, -bf15) %>% mutate(race= ifelse(race==1, "white", "black")) %>% mutate(sex= ifelse(sex==1, "male", "female")) %>% rename(aids=acc) %>% rename(gonnorhea= lnr) %>% rename(incarcerated= ir) %>% rename(unemployed= ur) %>% na.omit
+nrow(abortion)
+glimpse(abortion)
 
 # if your dataset needs tidying, do so here
 
@@ -65,57 +71,166 @@ library(tidyverse)
 
 ```{R}
 library(cluster)
-# clustering code here
+#CREATING CLUSTER
+clustered <- abortion %>% select(poverty, aids, gonnorhea) %>% scale %>% as.data.frame
+#DETERMINING SIL WIDTH FOR DIFFERENT NUMBER OF CLUSTERS
+sil_width<-vector() 
+for(i in 2:10){
+  kms <- kmeans(clustered,centers=i) #compute k-means solution for each k
+  sil <- silhouette(kms$cluster,dist(clustered)) #get sil widths
+sil_width[i]<-mean(sil[,3]) #take averages (higher is better)
+}
+ggplot()+geom_line(aes(x=1:10,y=sil_width))+scale_x_continuous(name="k",breaks=1:10)
+
+#PAM
+pam <- clustered %>% pam(4)
+pamclust<-clustered %>% mutate(cluster=as.factor(pam$clustering))
+#VISUALIZATION
+pamclust %>% ggplot(aes(x=aids,y=gonnorhea, color=cluster))+geom_point(size=2)
+library(GGally)
+ggpairs(pamclust, columns=1:4, aes(color=cluster))
+#MEANS FOR EACH CLUSTER
+pamclust %>% group_by(cluster) %>% summarize_if(is.numeric,mean,na.rm=T)
+abortion%>%slice(pam$id.med)
+#GOODNESS-OF-FIT
+pam$silinfo$avg.width
 ```
 
-Discussion of clustering here
+The variables selected for the cluster analysis were the rates of the stds (aids and gonnorhea) with the poverty rate of the state. Using the generated sihouette plot, the value that maximized the k-value was 4. These variables were then displayed in scatterplot and ggpairs to show the individual correlations. The highest correlation was between AIDS and poverty, however, even this was fairly low at .175. Surprisingly Gonnorhea and AIDS had the lowest correlation and was negatively correlated at -.007. The Goodness-of-fit was 0.2083014 which was pretty low so it was clear that the variables were not well selected for this analysis.
     
     
 ### Dimensionality Reduction with PCA
 
 ```{R}
-# PCA code here
+abortnums <- abortion %>% select_if(is.numeric)%>% select(-repeal) %>% scale
+abort_pca <-  princomp(abortnums, cor=T)
+summary(abort_pca, loadings=T)
+
+eigval <-  abort_pca$sdev^2 #square to convert SDs to eigenvalues
+varprop=round(eigval/sum(eigval), 2) #proportion of var explained by each PC
+
+
+ggplot() + geom_bar(aes(y=varprop, x=1:11), stat="identity") + xlab("") + geom_path(aes(y=varprop, x=1:11)) + 
+  geom_text(aes(x=1:11, y=varprop, label=round(varprop, 2)), vjust=1, col="white", size=5) + 
+  scale_y_continuous(breaks=seq(0, .6, .2), labels = scales::percent) + 
+  scale_x_continuous(breaks=1:10)
+library(factoextra)
+fviz_pca_biplot(abort_pca)
 ```
 
-Discussions of PCA here. 
+The PC scores indicate that principle comp 1 accounts for 0.25 variance in the dataset, comp 2 accounts for .18, and comp 3 accounts for .13, etc. To have a total variance of 80% we must include components 1-6. States in the database that score high in component 1 tends to have high income, low unemployment, poverty, and gonnorhea rates. Component 2 has higher population low incarceration and gonnorhea rates and so on (as displayed under loadings).
+According to the PCA biplot, the arrows represent the variables that have the most in common with each other such as unemployment rate and poverty which correlate negatively with income, crack index and aids rates. total population and age are unrelated to these variables but they are related to the gonnorhea prevalence and incarceration rates. 
 
 ###  Linear Classifier
 
 ```{R}
-# linear classifier code here
+modifiedabort <- abortion %>% select(repeal, poverty, gonnorhea, aids, incarcerated, unemployed, alcohol)
+
+modifiedabort %>% ggplot(aes(poverty, repeal))+geom_point()+geom_smooth(method="glm", se=F, method.args= list(family = "binomial"))
+
+logistic_fit <- glm(repeal ~., data=modifiedabort, family="binomial")
+
+prob_reg <- predict(logistic_fit, type="response")
+class_diag(prob_reg, modifiedabort$repeal, positive="1")
+
+#Confusion matrix
+y_hat <- ifelse(prob_reg > .5, 1, 0)
+
+table(truth = modifiedabort$repeal, predictions = y_hat) %>% addmargins
 ```
 
 ```{R}
-# cross-validation of linear classifier here
+library(caret)
+k=10
+
+data<-modifiedabort[sample(nrow(modifiedabort)),] #randomly order rows
+folds<-cut(seq(1:nrow(modifiedabort)),breaks=k,labels=F) #create 10 folds
+
+diags<-NULL
+for(i in 1:k){
+## Create training and test sets
+  train<-data[folds!=i,]
+  test<-data[folds==i,]
+  truth<-test$repeal
+## Train model on training set
+  fit<-glm(repeal~.,data=train, family= "binomial")
+  probs<-predict(fit,newdata = test,type="response")
+## Test model on test set (save all k results)
+  diags<-rbind(diags,class_diag(probs,truth, positive=1))
+}
+summarize_all(diags,mean)
 ```
 
-Discussion here
+The metrics of my logistic regression suggests that the accuracy was a proportion of 0.89242 individuals from my dataset which is fairly high. The sensitivity was 0.0254, meaning 2.54% of the positives were actually positive. The AUC value which indicates how well the model predicts was 0.7596 which is very similar to the value recorded through cross-validation showing no signs of overfitting.
+
 
 ### Non-Parametric Classifier
 
 ```{R}
 library(caret)
-# non-parametric classifier code here
+knn_fit <- knn3(factor(repeal==1,levels=c("TRUE","FALSE")) ~., data=modifiedabort, k=5)
+y_hat_knn <- predict(knn_fit,modifiedabort)
+
+class_diag(y_hat_knn[,1],modifiedabort$repeal, positive=1)
+
+#Confusion Matrix
+table(truth= factor(modifiedabort$repeal==1, levels=c("TRUE","FALSE")),
+prediction= factor(y_hat_knn[,1]>.5, levels=c("TRUE","FALSE")))
 ```
 
 ```{R}
-# cross-validation of np classifier here
+k=10 #choose number of folds
+data<-modifiedabort[sample(nrow(modifiedabort)),] #randomly order rows
+folds<-cut(seq(1:nrow(modifiedabort)),breaks=k,labels=F) #create 10 folds
+
+diags<-NULL
+for(i in 1:k){
+## Create training and test sets
+train<-data[folds!=i,]
+test<-data[folds==i,]
+truth<-test$repeal
+## Train model on training set
+fit<-knn3(repeal~.,data=train)
+probs<-predict(fit,newdata = test)[,2]
+## Test model on test set (save all k results)
+diags<-rbind(diags,class_diag(probs,truth, positive=1))
+}
+summarize_all(diags,mean)
 ```
 
-Discussion
+The nonparametric model performed better than the linear model. This is apparent due to the higher values for accuracy (0.9381), sensitivity(.5059), and AUC (.98) meaning that this model was better at classification and prediction of datapoints. However, through cross-validation, overfitting was observed due to the major discrepency between the AUC values compared to the CV AUC of .91358
 
 
 ### Regression/Numeric Prediction
 
 ```{R}
-# regression model code here
+fit <-lm(repeal~.,data=modifiedabort) #predict mpg from all other variables
+yhat<-predict(fit) #predicted mpg
+#MSE
+mean((modifiedabort$repeal-yhat)^2)
 ```
 
 ```{R}
-# cross-validation of regression model here
+k=5 #choose number of folds
+
+data<-modifiedabort[sample(nrow(modifiedabort)),] #randomly order rows
+folds<-cut(seq(1:nrow(modifiedabort)),breaks=k,labels=F) #create 10 folds
+
+diags<-NULL
+for(i in 1:k){
+train<-data[folds!=i,]
+test<-data[folds==i,]
+## Fit linear regression model to training set
+fit<-lm(repeal~.,data=train)
+## Get predictions/y-hats on test set (fold i)
+yhat<-predict(fit,newdata=test)
+## Compute prediction error (MSE) for fold i
+diags<-mean((test$repeal-yhat)^2)
+}
+mean(diags) 
 ```
 
-Discussion
+The average MSE for the dataset was 0.08543517 which is very low meaning less indication of overfitting and was cross-validated to suggest there wasn't overfitting present in the dataset.
 
 ### Python 
 
